@@ -1,530 +1,400 @@
 import React, { useState, useEffect } from 'react';
-import { Card, CardHeader, CardTitle, CardContent } from './components/ui/card';
-import { Badge } from './components/ui/badge';
-import { Button } from './components/ui/button';
+import { ShieldAlert, TrendingUp, Clock, Activity, CheckCircle2, AlertCircle } from 'lucide-react';
 import { Input } from './components/ui/input';
+import { Button } from './components/ui/button';
 import { Label } from './components/ui/label';
-import { Table, TableHeader, TableRow, TableHead, TableBody, TableCell } from './components/ui/table';
-import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts';
-import { AlertCircle, TrendingUp, TrendingDown, Clock, PieChart, ShieldAlert, CheckCircle2, Zap, Settings2 } from 'lucide-react';
-import { io } from 'socket.io-client';
-import { Slider } from './components/ui/slider';
-
-// Base metrics representing static or end-of-day history.
-// We'll compute real-time dynamic ratios using live WebSockets against these bases.
-const CANDIDATE_POOL_BASE = [
-  { code: 'sz002594', name: '比亚迪', baseMa20: 215.0, avgVol: 20000000, baseRsi: 25 },
-  { code: 'sh601919', name: '中远海控', baseMa20: 10.5, avgVol: 50000000, baseRsi: 27 },
-  { code: 'sz300750', name: '宁德时代', baseMa20: 180.0, avgVol: 25000000, baseRsi: 45 },
-  { code: 'sh601318', name: '中国平安', baseMa20: 44.5, avgVol: 30000000, baseRsi: 15 },
-  { code: 'sz000858', name: '五粮液', baseMa20: 148.0, avgVol: 12000000, baseRsi: 35 },
-  { code: 'sh600036', name: '招商银行', baseMa20: 32.5, avgVol: 45000000, baseRsi: 22 },
-  { code: 'sz002415', name: '海康威视', baseMa20: 31.0, avgVol: 20000000, baseRsi: 19 },
-];
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from './components/ui/dialog';
 
 export default function App() {
-  const [marketTemp, setMarketTemp] = useState(65);
-  const [quotes, setQuotes] = useState<any[]>([]);
-  const [myHoldings, setMyHoldings] = useState<any[]>([
-    { id: 1, code: 'sh600519', name: '贵州茅台', buyPrice: 1680.0, units: 100, trailingStop: 1650 },
-    { id: 2, code: 'sz300750', name: '宁德时代', buyPrice: 190.5, units: 500, trailingStop: 185 },
-  ]);
-  const [newTrade, setNewTrade] = useState({ code: '', name: '', buyPrice: '', units: '', atr: '' });
+  const [marketIndices, setMarketIndices] = useState<any[]>([]);
+  const [advDec, setAdvDec] = useState({ adv: 0, dec: 0 });
+  const [breakerActive, setBreakerActive] = useState(false);
   
-  // Strategy filtering parameters
-  const [strategyParams, setStrategyParams] = useState({
-    rsiThreshold: 30, // Buy if RSI <= 30
-    maPeriod: 20, // MA standard period
-    volumeTrigger: 1.5 // Buy if Volume >= 1.5x average
-  });
+  const [quantumSignals, setQuantumSignals] = useState<any[]>([]);
+  const [positions, setPositions] = useState<any[]>([]);
+  const [holdingsQuotes, setHoldingsQuotes] = useState<any[]>([]);
 
-  // Simulated historical for win-rate
-  const winRateData = [
-    { name: 'Jan', rate: 45, equity: 100 },
-    { name: 'Feb', rate: 48, equity: 105 },
-    { name: 'Mar', rate: 52, equity: 112 },
-    { name: 'Apr', rate: 60, equity: 125 },
-  ];
+  // Dialog State
+  const [selectedSignal, setSelectedSignal] = useState<any | null>(null);
+  const [isBuyDialogOpen, setIsBuyDialogOpen] = useState(false);
+  const [tradeDetails, setTradeDetails] = useState({ units: 0, hardStop: 0, buyPrice: 0 });
 
-  // System suggestions
-  const [suggestions, setSuggestions] = useState<any[]>([]);
-
-  // Update suggestions whenever params AND real-time quotes change
+  // Connect to backend SSE and fetch initial pos
   useEffect(() => {
-    const timeNow = new Date().toLocaleTimeString('en-US', { hour12: false });
-    const newSuggestions: any[] = [];
+    // 1. Fetch initial positions from API
+    fetch('/api/positions')
+      .then(r => r.json())
+      .then(data => setPositions(data))
+      .catch(e => console.error(e));
 
-    CANDIDATE_POOL_BASE.forEach(base => {
-      // Tie logic exclusively to the live socket data
-      const q = quotes.find(q => q.code === base.code);
-      if (!q) return; // Wait until we get live socket data
+    // 2. Setup Server-Sent Events
+    const sse = new EventSource('/api/stream');
 
-      // Real-time Moving Average evaluation
-      const liveMaRatio = q.price / base.baseMa20;
-      
-      // Real-time Volume Evaluation (using cumulative turnover approx for demo if shares are too scattered, but using shares directly here)
-      // Since Sina gives cumulative volume, an actual day's volume ratio requires a time scalar.
-      // E.g., if it's 10:30 AM (1 hour into trading), scale expected vol by 1/4. We just simulate real scale:
-      const realVolRatio = q.volume > 0 ? ((q.volume / base.avgVol) * 10) : (1.0 + Math.random()); // x10 to make it demo-visible since volume starts at 0 at 9:30 AM
-
-      // Real-time RSI tracking (Approximated based on live intraday jump)
-      const liveRsi = Math.max(0, Math.min(100, base.baseRsi + (q.changePercent * 2)));
-
-      if (
-        liveRsi <= strategyParams.rsiThreshold &&
-        liveMaRatio > 1.0 && // Current price must remain above the target MA support
-        realVolRatio >= strategyParams.volumeTrigger
-      ) {
-        newSuggestions.push({
-          id: `buy-${base.code}`,
-          type: 'BUY',
-          time: timeNow,
-          code: base.code,
-          name: base.name,
-          logic: `实时RSI(${liveRsi.toFixed(1)})超卖 + 放量(${realVolRatio.toFixed(1)}x) + MA${strategyParams.maPeriod} (${base.baseMa20}) 支撑确认`,
-          risk: (1 + Math.abs(q.changePercent)).toFixed(1) + '%'
-        });
-      }
+    sse.addEventListener('market_update', (e: any) => {
+      const data = JSON.parse(e.data);
+      setMarketIndices(data.indices || []);
+      setAdvDec(data.advanceDecline || { adv: 0, dec: 0 });
+      setBreakerActive(data.breakerActive || false);
     });
 
-    setSuggestions(newSuggestions);
-  }, [quotes, strategyParams.rsiThreshold, strategyParams.maPeriod, strategyParams.volumeTrigger]);
-
-  const [socket, setSocket] = useState<any>(null);
-
-  useEffect(() => {
-    // Only connect if we're not running in SSR/build
-    if (typeof window !== 'undefined') {
-      const s = io();
-      setSocket(s);
-      s.on('quotes', (data: any) => {
-        setQuotes(data);
+    sse.addEventListener('quantum_signals', (e: any) => {
+      const data = JSON.parse(e.data);
+      setQuantumSignals(prev => {
+        // Tag new signals to flash
+        const newIds = data.map((s:any) => s.id);
+        const merged = [...data];
+        return merged;
       });
-      return () => {
-        s.disconnect();
-      };
-    }
+    });
+
+    sse.addEventListener('holdings_quotes', (e: any) => {
+      const data = JSON.parse(e.data);
+      setHoldingsQuotes(data);
+    });
+
+    sse.addEventListener('positions_update', (e: any) => {
+      const data = JSON.parse(e.data);
+      setPositions(data);
+    });
+
+    return () => sse.close();
   }, []);
 
-  // Update logic on holdings based on real-time quotes
-  const holdingsWithAdvice = myHoldings.map(h => {
-    const q = quotes.find(q => q.code === h.code);
-    if (!q) return { ...h, currentPrice: h.buyPrice, pnlPercent: 0, advice: 'WAIT' };
-    
-    const pnl = q.price - h.buyPrice;
-    const pnlPercent = (pnl / h.buyPrice) * 100;
-    
-    let advice = 'HOLD';
-    let newStop = h.trailingStop;
-    
-    // Trailing stop logic
-    if (pnlPercent > 5) {
-      const potentialStop = q.price - (q.atr || q.price * 0.03); // use hardcoded 3% if no ATR
-      if (potentialStop > h.trailingStop) {
-        newStop = potentialStop;
-        advice = 'RAISE_STOP';
-      }
-    }
-    
-    if (q.price <= h.trailingStop) {
-      advice = 'SELL_STOP_LOSS';
-    }
-
-    return { ...h, currentPrice: q.price, pnlPercent, advice, newStop };
-  });
-
-  const handleAddTrade = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newTrade.code || !newTrade.buyPrice || !newTrade.units) return;
-    
-    const tradeUnits = parseInt(newTrade.units);
-    const existingIdx = myHoldings.findIndex(h => h.code === newTrade.code);
-
-    if (tradeUnits < 0) {
-      // Selling logic
-      if (existingIdx !== -1) {
-        const h = myHoldings[existingIdx];
-        const newUnits = h.units + tradeUnits;
-        if (newUnits <= 0) {
-          // Remove holding entirely
-          setMyHoldings(myHoldings.filter((_, i) => i !== existingIdx));
-        } else {
-          // Reduce holding
-          const updated = [...myHoldings];
-          updated[existingIdx] = { ...h, units: newUnits };
-          setMyHoldings(updated);
-        }
-      }
-    } else {
-      // Buying logic
-      if (existingIdx !== -1) {
-        // Average down/up existing position
-        alert("Holding already exists, adding to it is not fully implemented in demo, creating standalone slot.");
-      }
-      
-      setMyHoldings([...myHoldings, {
-        id: Date.now(),
-        code: newTrade.code,
-        name: newTrade.name || newTrade.code,
-        buyPrice: parseFloat(newTrade.buyPrice),
-        units: tradeUnits,
-        trailingStop: parseFloat(newTrade.buyPrice) * 0.95 // Default 5% stop
-      }]);
-    }
-    
-    if (socket) {
-      socket.emit("subscribe", newTrade.code);
-    }
-    
-    setNewTrade({ code: '', name: '', buyPrice: '', units: '', atr: '' });
+  const triggerBuyDialog = (signal: any) => {
+    setSelectedSignal(signal);
+    setTradeDetails({
+      units: signal.suggestedUnits,
+      hardStop: signal.hardStop,
+      buyPrice: signal.entryPrice
+    });
+    setIsBuyDialogOpen(true);
   };
 
-  // Generate SELL signals for holdings that have hit their stop loss
-  const sellSignals = holdingsWithAdvice
-    .filter(h => h.advice === 'SELL_STOP_LOSS')
-    .map(h => ({
-      id: `sell-${h.id}`,
-      type: 'SELL',
-      time: '实时 (Live)',
-      code: h.code,
-      name: h.name,
-      logic: `触发止损: 现价 ${h.currentPrice.toFixed(2)} 已跌破保护线 ${h.newStop.toFixed(2)}`,
-      risk: 'HIGH - 建议立刻平仓'
-    }));
+  const confirmBuy = async () => {
+    if (!selectedSignal) return;
+    const payload = {
+      code: selectedSignal.code,
+      name: selectedSignal.name,
+      buyPrice: tradeDetails.buyPrice,
+      units: tradeDetails.units,
+      hardStop: tradeDetails.hardStop,
+    };
+    await fetch('/api/positions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    setIsBuyDialogOpen(false);
+    setSelectedSignal(null);
+  };
 
-  const allSignals = [...sellSignals, ...suggestions];
+  const handleSell = async (id: number) => {
+    await fetch(`/api/positions/${id}`, {
+      method: 'DELETE'
+    });
+  };
+
+  const timeNow = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+  const shIndex = marketIndices.find(m => m.code === 's_sh000001') || { price: 0, changePercent: 0 };
+  const szIndex = marketIndices.find(m => m.code === 's_sz399001') || { price: 0, changePercent: 0 };
+
+  // Calculate live position status
+  const analyzedPositions = positions.map(pos => {
+    const q = holdingsQuotes.find(hq => hq.code === pos.code);
+    if (!q) return { ...pos, status: 'WAIT', livePrice: pos.buyPrice, pnl: 0 };
+    
+    // Simple logic:
+    // Red = < Hard Stop
+    // Yellow = < Base Price but > Hard Stop
+    // Green = > Base Price
+    
+    let status = 'HOLD'; // Green
+    if (q.price <= pos.hardStop) status = 'SELL_NOW'; // Red
+    else if (q.price < pos.buyPrice) status = 'WARNING'; // Yellow
+
+    const pnl = q.price - pos.buyPrice;
+    const pnlPct = (pnl / pos.buyPrice) * 100;
+
+    return { ...pos, livePrice: q.price, pnl, pnlPct, status };
+  });
 
   return (
-    <div className="flex h-screen w-full flex-col p-4 space-y-4 bg-slate-950 text-slate-50 font-sans overflow-hidden">
-      <header className="flex items-center justify-between glass-card p-4 h-16 shrink-0">
-        <div className="flex items-center space-x-4">
-          <div className="w-8 h-8 bg-blue-600 rounded flex items-center justify-center shadow-lg shadow-blue-500/20">
-            <div className="w-4 h-4 border-2 border-white border-t-transparent animate-spin rounded-full"></div>
+    <div className="flex h-screen w-full flex-col bg-black text-slate-50 font-sans overflow-hidden pattern-grid-lg">
+      {/* 1. 大盘温度条 (Market Temperature Bar) */}
+      <header className="flex items-center justify-between bg-slate-900/80 border-b border-slate-800 p-4 h-16 shrink-0 backdrop-blur-md z-10">
+        <div className="flex items-center space-x-6">
+          <div className="flex items-center gap-2">
+            <Activity className="w-5 h-5 text-blue-500 animate-pulse" />
+            <span className="font-bold tracking-widest text-sm uppercase text-slate-300">Quantum_Qant <span className="text-blue-500">v5</span></span>
           </div>
-          <h1 className="text-xl font-bold tracking-tight text-white flex items-center gap-2">
-            A-Quant <span className="font-thin text-slate-400">v4.2 PRO</span>
-          </h1>
+          
+          <div className="h-6 w-px bg-slate-700/50"></div>
+
+          <div className="flex items-center gap-6 font-mono text-sm">
+            <div className="flex flex-col">
+              <span className="text-[10px] text-slate-500 uppercase tracking-widest">上证 (SSE)</span>
+              <span className={`${shIndex.changePercent >= 0 ? 'text-red-500' : 'text-green-500'} font-bold flex items-center gap-2`}>
+                {shIndex.price.toFixed(2)} 
+                <span className="text-xs">({shIndex.changePercent > 0 ? '+' : ''}{shIndex.changePercent.toFixed(2)}%)</span>
+              </span>
+            </div>
+            <div className="flex flex-col">
+              <span className="text-[10px] text-slate-500 uppercase tracking-widest">深证 (SZSE)</span>
+              <span className={`${szIndex.changePercent >= 0 ? 'text-red-500' : 'text-green-500'} font-bold flex items-center gap-2`}>
+                {szIndex.price.toFixed(2)} 
+                <span className="text-xs">({szIndex.changePercent > 0 ? '+' : ''}{szIndex.changePercent.toFixed(2)}%)</span>
+              </span>
+            </div>
+          </div>
         </div>
-        
-        <div className="flex space-x-6 text-sm">
-          <div className="flex flex-col items-end">
-            <span className="text-slate-400 text-xs">上证指数 (SSE)</span>
-            <div className="flex items-center gap-2">
-              <span className="font-mono font-bold text-profit">3,074.32 +0.42%</span>
-            </div>
+
+        <div className="flex items-center gap-6">
+          <div className="flex items-center gap-3">
+             <div className="text-right">
+               <div className="text-[10px] text-slate-500 uppercase tracking-widest">市场涨跌比</div>
+               <div className="font-mono text-sm">
+                 <span className="text-red-500 font-bold">{advDec.adv}</span>
+                 <span className="text-slate-600 mx-2">/</span>
+                 <span className="text-green-500 font-bold">{advDec.dec}</span>
+               </div>
+             </div>
+             {/* Simple thermometer bar */}
+             <div className="w-24 h-2 bg-slate-800 rounded-full overflow-hidden flex">
+                <div className="h-full bg-red-500" style={{ width: `${(advDec.adv / (advDec.adv + advDec.dec + 1)) * 100}%` }}></div>
+                <div className="h-full bg-green-500 flex-1"></div>
+             </div>
           </div>
-          <div className="flex flex-col items-end">
-            <span className="text-slate-400 text-xs">沪深300 (CSI300)</span>
-            <div className="flex items-center gap-2">
-              <span className="font-mono font-bold text-loss">3,521.18 -0.15%</span>
+          
+          {breakerActive && (
+            <div className="bg-red-900/50 text-red-400 border border-red-500/50 px-3 py-1 text-xs font-bold rounded animate-pulse display-flex items-center gap-2">
+              <ShieldAlert className="w-4 h-4" /> 熔断警告 / BREAKER
             </div>
-          </div>
-          <div className="h-full border-r border-slate-700"></div>
-          <div className="flex flex-col justify-center gap-1">
-            <span className="text-slate-200 font-mono text-xs text-right">09:30:14</span>
-            <span className="status-pill bg-emerald-500/10 text-emerald-500 text-center">
-              交易中 (Live)
-            </span>
+          )}
+
+          <div className="text-slate-600 font-mono text-sm pl-4 border-l border-slate-800">
+            {timeNow}
           </div>
         </div>
       </header>
 
-      <main className="flex flex-1 gap-4 overflow-hidden mb-2">
-        
-        {/* Left Column: Market & Signals */}
-        <aside className="w-80 flex flex-col space-y-4 shrink-0 h-full overflow-y-auto pr-2" style={{ scrollbarWidth: 'none' }}>
-          {/* Market Temperature Panel */}
-          <div className="glass-card flex flex-col p-4 shrink-0">
-            <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-widest mb-4">市场温度计</h2>
-            <div className="relative h-32 w-full flex flex-col items-center justify-center">
-              <div className={`text-4xl font-black ${marketTemp > 60 ? 'text-loss' : marketTemp < 40 ? 'text-profit' : 'text-amber-500'}`}>
-                {marketTemp}°
-              </div>
-              <div className="text-xs text-slate-500 mt-1">情绪状态：{marketTemp > 60 ? '过热' : marketTemp < 40 ? '冰点' : '活跃'}</div>
-              <div className="mt-4 w-full h-2 bg-slate-800 rounded-full overflow-hidden">
-                <div 
-                  className="h-full bg-gradient-to-r from-emerald-500 via-amber-500 to-rose-500 transition-all duration-1000"
-                  style={{ width: marketTemp + '%' }}
-                ></div>
-              </div>
-            </div>
-            <div className="mt-6 space-y-3">
-              <div className="flex justify-between text-xs">
-                <span className="text-slate-400">连板天数最高</span>
-                <span className="text-white">4天</span>
-              </div>
-              <div className="flex justify-between text-xs">
-                <span className="text-slate-400">涨跌比</span>
-                <span><span className="text-profit">2,840</span> / <span className="text-loss">1,912</span></span>
-              </div>
-              <div className="flex justify-between text-xs">
-                <span className="text-slate-400">昨日换手</span>
-                <span className="text-white font-mono">8,402亿</span>
-              </div>
-            </div>
+      <div className="flex-1 flex overflow-hidden">
+        {/* 2. 买入候选区 (Candidate Buy Zone - Harmonic Oscillator Signals) */}
+        <aside className="w-1/2 p-4 flex flex-col border-r border-slate-800/50 bg-slate-950/30">
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-sm font-bold uppercase tracking-widest text-slate-300 flex items-center gap-2">
+              <div className="w-2 h-2 bg-blue-500 rounded-full animate-ping"></div>
+              Quantum Oscillator Signals
+            </h2>
+            <span className="text-[10px] text-slate-500 font-mono">Scan Interval: 5m</span>
           </div>
 
-          {/* Interactive Strategy Engine Filter */}
-          <div className="glass-card flex flex-col p-4 bg-slate-900/50 shrink-0">
-            <h3 className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-4 flex items-center gap-2">
-              <Settings2 className="w-4 h-4 text-blue-500" />
-              Engine Parameters
-            </h3>
-            
-            <div className="space-y-5">
-              {/* RSI Parameter */}
-              <div className="space-y-2">
-                <div className="flex justify-between text-xs">
-                  <span className="text-slate-400">RSI Threshold (Under)</span>
-                  <span className="text-white font-mono">{strategyParams.rsiThreshold}</span>
-                </div>
-                <Slider 
-                  value={[strategyParams.rsiThreshold]} 
-                  max={50} min={10} step={1}
-                  onValueChange={(val) => setStrategyParams({...strategyParams, rsiThreshold: val[0]})}
-                  className="w-full"
-                />
-              </div>
-
-              {/* Volume Multiplier */}
-              <div className="space-y-2">
-                <div className="flex justify-between text-xs">
-                  <span className="text-slate-400">Volume Multiplier (x)</span>
-                  <span className="text-white font-mono">{strategyParams.volumeTrigger.toFixed(1)}x</span>
-                </div>
-                <Slider 
-                  value={[strategyParams.volumeTrigger]} 
-                  max={4.0} min={1.0} step={0.1}
-                  onValueChange={(val) => setStrategyParams({...strategyParams, volumeTrigger: val[0]})}
-                  className="w-full"
-                />
-              </div>
-
-              {/* MA Period */}
-              <div className="space-y-2">
-                <div className="flex justify-between text-xs">
-                  <span className="text-slate-400">Moving Average Period</span>
-                  <span className="text-white font-mono">MA{strategyParams.maPeriod}</span>
-                </div>
-                <Slider 
-                  value={[strategyParams.maPeriod]} 
-                  max={60} min={5} step={5}
-                  onValueChange={(val) => setStrategyParams({...strategyParams, maPeriod: val[0]})}
-                  className="w-full"
-                />
-              </div>
-            </div>
-            <div className="mt-4 pt-3 border-t border-slate-800 text-[10px] text-slate-500 text-center">
-              Candidate Pool Updates Instantly
-            </div>
-          </div>
-
-          {/* System Signals */}
-          <div className="glass-card flex flex-col p-0 overflow-hidden shrink-0 max-h-[400px]">
-            <div className="p-4 border-b border-slate-800 flex justify-between items-center bg-slate-900/30">
-              <h3 className="text-sm font-bold flex items-center gap-2">
-                <span className="w-2 h-2 bg-red-500 rounded-full animate-pulse"></span>
-                实时决策引擎
-              </h3>
-            </div>
-            <div className="flex-1 overflow-y-auto p-4 space-y-3">
-                {allSignals.map(s => {
-                  const isSell = s.type === 'SELL';
-                  return (
-                  <div key={s.id} className={`flex items-start gap-4 p-3 border-l-4 ${isSell ? 'border-loss bg-rose-500/5' : 'border-profit bg-emerald-500/5'} rounded-r-lg mb-3`}>
-                    <div className="flex flex-col">
-                      <span className="text-xs font-mono text-slate-500">{s.time}</span>
-                      <span className={`font-bold ${isSell ? 'text-loss' : 'text-profit'}`}>{s.type === 'BUY' ? '买入建议 (BUY)' : '止损平仓 (SELL)'}</span>
-                    </div>
-                    <div className="flex-1">
-                      <div className="flex justify-between">
-                        <span className="font-bold text-slate-50">{s.name} ({s.code})</span>
-                      </div>
-                      <p className="text-xs text-slate-400 mt-1">系统评级：风险 {s.risk}</p>
-                      <p className={`text-[10px] font-mono mt-1 opacity-80 ${isSell ? 'text-rose-400' : 'text-emerald-400'}`}>{s.logic}</p>
-                    </div>
-                    <div className="text-right flex items-center h-full">
-                      <button 
-                        className={`${isSell ? 'bg-rose-600/20 text-rose-400 border-rose-500/30 hover:bg-rose-600/40' : 'bg-blue-600/20 text-blue-400 border-blue-500/30 hover:bg-blue-600/40'} border px-3 py-1 rounded text-xs transition-colors`}
-                        onClick={() => {
-                          let fillUnits = '';
-                          if (isSell) {
-                            const holding = myHoldings.find(h => h.code === s.code);
-                            fillUnits = holding ? `-${holding.units}` : '';
-                          }
-                          
-                          setNewTrade(prev => ({ 
-                            ...prev, 
-                            code: s.code, 
-                            name: s.name,
-                            units: fillUnits
-                          }))
-                        }}
-                      >
-                        Auto-fill
-                      </button>
-                    </div>
-                  </div>
-                )})}
-                {allSignals.length === 0 && (
-                  <div className="p-6 text-center text-[10px] text-slate-600 uppercase tracking-widest font-bold">
-                    [ No Signals ]
-                  </div>
-                )}
-              </div>
-          </div>
-          
-          {/* Active Quotes List */}
-          <div className="glass-card flex flex-col p-4 shrink-0">
-            <h3 className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-4">Market Pulse</h3>
-            <Table>
-              <TableBody>
-                {quotes.slice(0, 5).map(q => (
-                  <TableRow key={q.code} className="border-slate-800/50 hover:bg-slate-800/30">
-                    <TableCell className="py-2 text-xs font-medium text-slate-200">{q.name}</TableCell>
-                    <TableCell className="py-2 text-right font-mono text-xs text-slate-300">
-                      {q.price.toFixed(2)}
-                    </TableCell>
-                    <TableCell className={`py-2 text-right font-mono text-xs ${q.change >= 0 ? 'text-profit' : 'text-loss'}`}>
-                      {q.change >= 0 ? '+' : ''}{q.changePercent}%
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </div>
-        </aside>
-
-        {/* Middle Column: Current Positions & Advice */}
-        <div className="flex-1 flex flex-col space-y-4 overflow-hidden">
-          <div className="glass-card h-full flex flex-col p-0 overflow-hidden">
-            <div className="p-4 border-b border-slate-800 bg-slate-900/50 flex items-center justify-between">
-              <h3 className="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-2">
-                <CheckCircle2 className="w-4 h-4 text-blue-500" />
-                Active Portfolio & Dynamic Advice
-              </h3>
-            </div>
-            <div className="p-4 flex-1">
-              <div className="space-y-4 overflow-y-auto">
-                {holdingsWithAdvice.map(h => (
-                  <div key={h.id} className="p-4 rounded-lg glass-card flex items-center justify-between transition-all hover:bg-slate-800/30 mb-3 shrink-0">
-                    <div className="flex-1">
-                      <div className="font-bold text-white">{h.name}</div>
-                      <div className="text-slate-500 text-[10px] font-mono">{h.code}</div>
-                      <div className="mt-1 text-xs text-slate-400 font-mono">Buy: {h.buyPrice.toFixed(2)} &nbsp;&bull;&nbsp; Units: {h.units}</div>
-                    </div>
-                    
-                    <div className="w-1/4 text-right">
-                      <div className="font-mono text-white text-sm">{h.currentPrice.toFixed(2)}</div>
-                      <div className={`font-mono text-xs ${h.pnlPercent >= 0 ? 'text-profit' : 'text-loss'}`}>
-                        {h.pnlPercent >= 0 ? '+' : ''}{h.pnlPercent.toFixed(2)}%
-                      </div>
-                    </div>
-
-                    <div className="w-1/4 text-center">
-                      <div className="text-slate-400 font-mono text-xs">{h.newStop.toFixed(2)}</div>
-                      <div className="text-[10px] text-slate-500 uppercase">Protection Line</div>
-                    </div>
-
-                    <div className="w-1/4 text-right">
-                      {h.advice === 'SELL_STOP_LOSS' ? (
-                        <span className="text-rose-400 text-xs font-bold flex items-center justify-end gap-1"><ShieldAlert className="w-3 h-3" /> 止损平仓</span>
-                      ) : h.advice === 'RAISE_STOP' ? (
-                        <span className="text-emerald-400 text-xs font-bold flex items-center justify-end gap-1"><TrendingUp className="w-3 h-3" /> 动态止盈</span>
-                      ) : (
-                        <span className="text-blue-400 text-xs font-bold flex items-center justify-end gap-1"><Clock className="w-3 h-3" /> 持股待涨</span>
-                      )}
-                    </div>
-                  </div>
-                ))}
+          <div className="flex-1 overflow-y-auto space-y-3 pr-2 scrollbar-thin">
+            {quantumSignals.map(sig => (
+              <div key={sig.id} className="bg-slate-900/80 border border-blue-900/30 p-4 rounded-lg hover:border-blue-700/50 transition-colors relative overflow-hidden group">
+                <div className="absolute top-0 left-0 w-1 h-full bg-blue-600"></div>
                 
-                {holdingsWithAdvice.length === 0 && (
-                  <div className="text-center py-12 text-slate-500">
-                    <p>No active positions.</p>
-                    <p className="text-sm mt-2">Use the right panel to record a trade or wait for system signals.</p>
+                <div className="flex justify-between items-start mb-2">
+                  <div>
+                    <h3 className="text-lg font-bold text-white flex items-center gap-2">
+                      {sig.name} <span className="text-slate-500 text-xs font-mono">({sig.code})</span>
+                    </h3>
+                    <p className="text-[10px] font-mono text-blue-400 mt-1 opacity-80 leading-relaxed">
+                      {sig.logic}
+                    </p>
                   </div>
-                )}
-              </div>
-            </div>
-          </div>
-        </div>
+                  <button 
+                    onClick={() => triggerBuyDialog(sig)}
+                    className="bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold py-1.5 px-4 rounded shadow-lg shadow-blue-900/30 transition-all active:scale-95 flex items-center gap-1"
+                  >
+                    <CheckCircle2 className="w-3 h-3" /> 我买了
+                  </button>
+                </div>
 
-        {/* Right Column: Add Trade & Logs */}
-        <aside className="w-1/4 flex flex-col space-y-4 shrink-0 min-w-72">
-          <div className="glass-card p-4 shrink-0">
-            <h3 className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-4">Record Execution</h3>
-            <form onSubmit={handleAddTrade} className="space-y-4">
-              <div className="grid grid-cols-2 gap-4">
-                <div className="space-y-1">
-                  <Label className="text-[10px] uppercase text-slate-500 font-bold">Code</Label>
-                  <Input 
-                    className="font-mono text-sm h-8 bg-slate-900 border-slate-700 text-slate-200" 
-                    placeholder="sh600519" 
-                    value={newTrade.code}
-                    onChange={e => setNewTrade({...newTrade, code: e.target.value})}
-                  />
-                </div>
-                <div className="space-y-1">
-                  <Label className="text-[10px] uppercase text-slate-500 font-bold">Name</Label>
-                  <Input 
-                    className="text-sm h-8 bg-slate-900 border-slate-700 text-slate-200" 
-                    placeholder="贵州茅台"
-                    value={newTrade.name}
-                    onChange={e => setNewTrade({...newTrade, name: e.target.value})}
-                  />
-                </div>
-                <div className="space-y-1">
-                  <Label className="text-[10px] uppercase text-slate-500 font-bold">Fill Price</Label>
-                  <Input 
-                    className="font-mono text-sm h-8 bg-slate-900 border-slate-700 text-slate-200" 
-                    type="number" step="0.01" 
-                    value={newTrade.buyPrice}
-                    onChange={e => setNewTrade({...newTrade, buyPrice: e.target.value})}
-                  />
-                </div>
-                <div className="space-y-1">
-                  <Label className="text-[10px] uppercase text-slate-500 font-bold">Units / Shrs</Label>
-                  <Input 
-                    className="font-mono text-sm h-8 bg-slate-900 border-slate-700 text-slate-200" 
-                    type="number" 
-                    value={newTrade.units}
-                    onChange={e => setNewTrade({...newTrade, units: e.target.value})}
-                  />
+                <div className="grid grid-cols-3 gap-2 mt-4 text-xs font-mono">
+                  <div className="bg-slate-950 p-2 rounded border border-slate-800">
+                    <div className="text-slate-500 mb-1 text-[9px] uppercase">入场价 (Entry)</div>
+                    <div className="text-red-400">{sig.entryPrice.toFixed(2)}</div>
+                  </div>
+                  <div className="bg-slate-950 p-2 rounded border border-slate-800">
+                    <div className="text-slate-500 mb-1 text-[9px] uppercase">硬止损 (Hard Stop)</div>
+                    <div className="text-slate-300">{sig.hardStop.toFixed(2)}</div>
+                  </div>
+                  <div className="bg-slate-950 p-2 rounded border border-slate-800">
+                    <div className="text-slate-500 mb-1 text-[9px] uppercase">建议仓位 (Units)</div>
+                    <div className="text-blue-400">{sig.suggestedUnits} 股</div>
+                  </div>
                 </div>
               </div>
-              <Button type="submit" className="w-full text-xs h-9 bg-blue-600 hover:bg-blue-500 text-white font-bold py-3 px-4 rounded-lg flex items-center justify-center gap-2 transition-all shadow-lg shadow-blue-900/20 border-0">Sync to System</Button>
-            </form>
-          </div>
-
-          {/* System Logs */}
-          <div className="glass-card flex-1 flex flex-col overflow-hidden">
-            <div className="p-3 border-b border-slate-800 bg-slate-900/50 flex items-center justify-between shrink-0">
-              <h3 className="text-xs font-bold uppercase tracking-wider text-slate-400">System Terminal</h3>
-            </div>
-            <div className="bg-black/80 text-[#0f0] font-mono text-[10px] p-4 flex-1 overflow-y-auto leading-relaxed">
-              <div>&gt; [16:00:01] Data scrubbing initiated...</div>
-              <div>&gt; [16:01:45] ATR calculation [PASS]</div>
-              <div>&gt; [16:05:00] Identifying momentum anomalies...</div>
-              <div>&gt; [16:05:12] Found 3 ST stocks in pool. Filtering...</div>
-              <div>&gt; [16:06:01] sz002594 RS rating &gt; 90. Triggering deeper scan.</div>
-              <div>&gt; [16:06:45] Signal Generated: sz002594 (BUY)</div>
-              <div>&gt; [SYSTEM] Awaiting market open...</div>
-              <div className="animate-pulse mt-2">_</div>
-            </div>
+            ))}
+            {quantumSignals.length === 0 && (
+              <div className="flex flex-col items-center justify-center h-40 text-slate-600 gap-2">
+                <Activity className="w-8 h-8 opacity-20" />
+                <span className="text-xs font-mono uppercase tracking-widest">Awaiting Quantum Perturbations...</span>
+              </div>
+            )}
           </div>
         </aside>
 
-      </main>
-      <footer className="h-8 flex items-center justify-between px-4 text-[10px] text-slate-500 border-t border-slate-800/50 mt-auto shrink-0">
-        <div className="flex space-x-4 uppercase font-semibold tracking-tighter">
-          <span>PostgreSQL: Connected</span>
-          <span className="text-emerald-500">Tushare API: Active</span>
-          <span>Task: Daily_Data_Refresh (Wait)</span>
-        </div>
-        <div>
-          &copy; 2026 AI-Quant Systems Group. Powered by Vectorized Python 3.11
-        </div>
-      </footer>
+        {/* 3. 持仓监控区 (Holdings Monitor Zone) */}
+        <main className="w-1/2 p-4 flex flex-col bg-black">
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-sm font-bold uppercase tracking-widest text-slate-300 flex items-center gap-2">
+              <ShieldAlert className="w-4 h-4 text-slate-500" />
+              Active Positions Tracker
+            </h2>
+            <span className="text-[10px] text-slate-500 font-mono">Sync: 30s Live</span>
+          </div>
+
+          <div className="flex-1 overflow-y-auto space-y-3 pr-2 scrollbar-thin">
+            {analyzedPositions.map(pos => {
+              // Styling based on status
+              const isRed = pos.status === 'SELL_NOW';
+              const isYellow = pos.status === 'WARNING';
+              const isGreen = pos.status === 'HOLD';
+
+              let borderColor = 'border-slate-800';
+              let bgColor = 'bg-slate-900/50';
+              let statusLabel = 'HOLD';
+              let statusIcon = <Clock className="w-3 h-3" />;
+              
+              if (isRed) {
+                borderColor = 'border-red-500';
+                bgColor = 'bg-red-950/20';
+                statusLabel = '立刻卖 (SELL NOW)';
+                statusIcon = <ShieldAlert className="w-3 h-3 animate-pulse" />;
+              } else if (isYellow) {
+                borderColor = 'border-yellow-500/50';
+                bgColor = 'bg-yellow-950/10';
+                statusLabel = '接近止损 (WARNING)';
+                statusIcon = <AlertCircle className="w-3 h-3" />;
+              } else if (isGreen) {
+                borderColor = 'border-green-500/30';
+                statusLabel = '安全 (HOLD)';
+                statusIcon = <TrendingUp className="w-3 h-3" />;
+              }
+
+              return (
+                <div key={pos.id} className={`border ${borderColor} ${bgColor} p-4 rounded-lg transition-colors flex items-center justify-between group relative overflow-hidden`}>
+                  {isRed && <div className="absolute inset-0 bg-red-500/5 animate-pulse pointer-events-none"></div>}
+                  
+                  <div className="flex-1 z-10">
+                    <div className="flex items-center gap-2 mb-1">
+                      <span className="font-bold text-white text-base">{pos.name}</span>
+                      <span className="text-slate-500 text-xs font-mono">{pos.code}</span>
+                    </div>
+                    <div className="flex gap-4 text-xs font-mono text-slate-400">
+                      <span>成本: {pos.buyPrice.toFixed(2)}</span>
+                      <span>止损: <span className={isRed ? 'text-red-400 font-bold' : ''}>{pos.hardStop.toFixed(2)}</span></span>
+                      <span>持有: {pos.units}</span>
+                    </div>
+                  </div>
+
+                  <div className="flex flex-col items-end z-10 w-32 border-r border-slate-800 pr-4 mr-4">
+                    <div className="text-slate-500 text-[9px] uppercase mb-1">当前现价</div>
+                    <div className={`font-mono text-lg font-bold ${pos.pnl >= 0 ? 'text-red-400' : 'text-green-400'}`}>
+                      {pos.livePrice.toFixed(2)}
+                    </div>
+                    <div className={`font-mono text-xs ${pos.pnl >= 0 ? 'text-red-500/80' : 'text-green-500/80'}`}>
+                      {pos.pnl >= 0 ? '+' : ''}{pos.pnlPct.toFixed(2)}%
+                    </div>
+                  </div>
+
+                  <div className="flex flex-col items-end z-10 w-28 gap-2">
+                    <div className={`text-[10px] font-bold flex items-center gap-1 uppercase tracking-wider ${isRed ? 'text-red-400' : isYellow ? 'text-yellow-400' : 'text-green-400'}`}>
+                      {statusIcon} {statusLabel}
+                    </div>
+                    {isRed && (
+                      <button 
+                         onClick={() => handleSell(pos.id)}
+                         className="bg-red-600/20 text-red-400 hover:bg-red-600 hover:text-white border border-red-500/30 text-xs px-3 py-1 rounded transition-colors w-full"
+                      >
+                        标记卖出
+                      </button>
+                    )}
+                    {!isRed && (
+                      <button 
+                         onClick={() => handleSell(pos.id)}
+                         className="text-slate-600 hover:text-red-400 text-xs px-3 py-1 transition-colors w-full text-right"
+                      >
+                        清仓脱离
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+
+            {positions.length === 0 && (
+              <div className="flex flex-col items-center justify-center h-64 text-slate-600 gap-2 border border-dashed border-slate-800 rounded-lg mx-6">
+                <Clock className="w-8 h-8 opacity-20" />
+                <span className="text-xs font-mono uppercase tracking-widest text-center px-8">
+                  No tracking positions found in positions.jsonl.<br/>
+                  Click "我买了" on a candidate signal to start tracking.
+                </span>
+              </div>
+            )}
+          </div>
+        </main>
+      </div>
+
+      {/* Confirmation Dialog */}
+      <Dialog open={isBuyDialogOpen} onOpenChange={setIsBuyDialogOpen}>
+        <DialogContent className="bg-slate-950 border-blue-900 border text-slate-50">
+          <DialogHeader>
+            <DialogTitle className="text-blue-400">确认记录此笔买入执行</DialogTitle>
+            <DialogDescription className="text-slate-400">
+              系统将把此笔交易写入本地 positions.jsonl，并即刻开启量子止损追踪雷达。
+            </DialogDescription>
+          </DialogHeader>
+          {selectedSignal && (
+            <div className="grid gap-4 py-4 mt-2">
+              <div className="bg-blue-900/10 p-4 border border-blue-800/30 rounded-lg space-y-4">
+                <div className="flex justify-between items-center">
+                  <span className="text-slate-400 text-xs font-mono uppercase">标的 (Asset)</span>
+                  <span className="font-bold">{selectedSignal.name} ({selectedSignal.code})</span>
+                </div>
+                
+                <div className="grid grid-cols-4 items-center gap-4">
+                  <Label htmlFor="buyPrice" className="text-right text-xs text-slate-400">入场价</Label>
+                  <Input
+                    id="buyPrice"
+                    type="number"
+                    value={tradeDetails.buyPrice}
+                    onChange={(e) => setTradeDetails({ ...tradeDetails, buyPrice: parseFloat(e.target.value) || 0 })}
+                    className="col-span-3 bg-slate-900 border-slate-700 h-8 font-mono text-xs"
+                  />
+                </div>
+                <div className="grid grid-cols-4 items-center gap-4">
+                  <Label htmlFor="units" className="text-right text-xs text-slate-400">单位/股数</Label>
+                  <Input
+                    id="units"
+                    type="number"
+                    value={tradeDetails.units}
+                    onChange={(e) => setTradeDetails({ ...tradeDetails, units: parseInt(e.target.value) || 0 })}
+                    className="col-span-3 bg-slate-900 border-slate-700 h-8 font-mono text-xs"
+                  />
+                </div>
+                <div className="grid grid-cols-4 items-center gap-4">
+                  <Label htmlFor="hardStop" className="text-right text-xs text-slate-400">硬止损线</Label>
+                  <Input
+                    id="hardStop"
+                    type="number"
+                    value={tradeDetails.hardStop}
+                    onChange={(e) => setTradeDetails({ ...tradeDetails, hardStop: parseFloat(e.target.value) || 0 })}
+                    className="col-span-3 bg-slate-900 border-slate-700 h-8 font-mono text-xs text-rose-400"
+                  />
+                </div>
+              </div>
+            </div>
+          )}
+          <DialogFooter>
+            <Button variant="ghost" className="text-slate-400 hover:text-slate-200" onClick={() => setIsBuyDialogOpen(false)}>取消</Button>
+            <Button onClick={confirmBuy} className="bg-blue-600 hover:bg-blue-500 text-white gap-2">
+              <CheckCircle2 className="w-4 h-4" /> 确认写入追踪
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
