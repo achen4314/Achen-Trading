@@ -41,7 +41,10 @@ async function startServer() {
   });
 
   // Real-time stream using socket.io with ACTUAL data from Sina API
-  let activeSymbols = new Set(['sh600519', 'sz000858', 'sz300750', 'sh601318', 'sz002594']);
+  let activeSymbols = new Set([
+    'sh600519', 'sz000858', 'sz300750', 'sh601318', 
+    'sz002594', 'sh601919', 'sh600036', 'sz002415'
+  ]);
 
   io.on("connection", (socket) => {
     socket.on("subscribe", (code: string) => {
@@ -79,6 +82,8 @@ async function startServer() {
             const prevClose = parseFloat(parts[2]);
             const change = currentPrice - prevClose;
             const changePercent = prevClose > 0 ? (change / prevClose) * 100 : 0;
+            const volume = parseFloat(parts[8]) || 0; // Cumulative volume in shares
+            const turnover = parseFloat(parts[9]) || 0; // Cumulative turnover in RMB
             
             parsedQuotes.push({
               code,
@@ -86,6 +91,8 @@ async function startServer() {
               price: currentPrice,
               change: parseFloat(change.toFixed(2)),
               changePercent: parseFloat(changePercent.toFixed(2)),
+              volume: volume,
+              turnover: turnover,
               atr: 2.5 // Simulated for now
             });
           }
