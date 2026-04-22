@@ -1,18 +1,39 @@
 import React, { useState, useEffect } from 'react';
-import { ShieldAlert, TrendingUp, Clock, Activity, CheckCircle2, AlertCircle } from 'lucide-react';
+import { ShieldAlert, TrendingUp, Clock, Activity, CheckCircle2, AlertCircle, Settings2, Zap } from 'lucide-react';
 import { Input } from './components/ui/input';
 import { Button } from './components/ui/button';
 import { Label } from './components/ui/label';
+import { Slider } from './components/ui/slider';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from './components/ui/dialog';
+
+const CANDIDATE_POOL_BASE = [
+  { code: 'sz002594', name: '比亚迪', baseMa20: 215.0, avgVol: 20000000, baseRsi: 25 },
+  { code: 'sh601919', name: '中远海控', baseMa20: 10.5, avgVol: 50000000, baseRsi: 27 },
+  { code: 'sz300750', name: '宁德时代', baseMa20: 180.0, avgVol: 25000000, baseRsi: 45 },
+  { code: 'sh601318', name: '中国平安', baseMa20: 44.5, avgVol: 30000000, baseRsi: 15 },
+  { code: 'sz000858', name: '五粮液', baseMa20: 148.0, avgVol: 12000000, baseRsi: 35 },
+  { code: 'sh600036', name: '招商银行', baseMa20: 32.5, avgVol: 45000000, baseRsi: 22 },
+  { code: 'sz002415', name: '海康威视', baseMa20: 31.0, avgVol: 20000000, baseRsi: 19 },
+];
 
 export default function App() {
   const [marketIndices, setMarketIndices] = useState<any[]>([]);
   const [advDec, setAdvDec] = useState({ adv: 0, dec: 0 });
   const [breakerActive, setBreakerActive] = useState(false);
   
+  const [liveQuotes, setLiveQuotes] = useState<any[]>([]);
   const [quantumSignals, setQuantumSignals] = useState<any[]>([]);
+  const [classicSignals, setClassicSignals] = useState<any[]>([]);
+  
   const [positions, setPositions] = useState<any[]>([]);
   const [holdingsQuotes, setHoldingsQuotes] = useState<any[]>([]);
+
+  // Strategy Params
+  const [strategyParams, setStrategyParams] = useState({
+    rsiThreshold: 30,
+    maPeriod: 20,
+    volumeTrigger: 1.5
+  });
 
   // Dialog State
   const [selectedSignal, setSelectedSignal] = useState<any | null>(null);
@@ -21,13 +42,11 @@ export default function App() {
 
   // Connect to backend SSE and fetch initial pos
   useEffect(() => {
-    // 1. Fetch initial positions from API
     fetch('/api/positions')
       .then(r => r.json())
       .then(data => setPositions(data))
       .catch(e => console.error(e));
 
-    // 2. Setup Server-Sent Events
     const sse = new EventSource('/api/stream');
 
     sse.addEventListener('market_update', (e: any) => {
@@ -37,19 +56,15 @@ export default function App() {
       setBreakerActive(data.breakerActive || false);
     });
 
-    sse.addEventListener('quantum_signals', (e: any) => {
+    sse.addEventListener('live_quotes', (e: any) => {
       const data = JSON.parse(e.data);
-      setQuantumSignals(prev => {
-        // Tag new signals to flash
-        const newIds = data.map((s:any) => s.id);
-        const merged = [...data];
-        return merged;
-      });
+      setLiveQuotes(data);
+      setHoldingsQuotes(data); // Using the general active quotes pour
     });
 
-    sse.addEventListener('holdings_quotes', (e: any) => {
+    sse.addEventListener('quantum_signals', (e: any) => {
       const data = JSON.parse(e.data);
-      setHoldingsQuotes(data);
+      setQuantumSignals(data);
     });
 
     sse.addEventListener('positions_update', (e: any) => {
@@ -59,6 +74,42 @@ export default function App() {
 
     return () => sse.close();
   }, []);
+
+  // Compute Classic Signals
+  useEffect(() => {
+    const timeNow = new Date().toLocaleTimeString('en-US', { hour12: false });
+    const newSuggestions: any[] = [];
+
+    CANDIDATE_POOL_BASE.forEach(base => {
+      const q = liveQuotes.find(q => q.code === base.code);
+      if (!q) return;
+
+      const liveMaRatio = q.price / base.baseMa20;
+      const realVolRatio = q.volume > 0 ? ((q.volume / base.avgVol) * 10) : (1.0 + Math.random());
+      const liveRsi = Math.max(0, Math.min(100, base.baseRsi + (q.changePercent * 2)));
+
+      if (
+        liveRsi <= strategyParams.rsiThreshold &&
+        liveMaRatio > 1.0 &&
+        realVolRatio >= strategyParams.volumeTrigger
+      ) {
+        newSuggestions.push({
+          id: `buy-${base.code}`,
+          type: 'CLASSIC_BUY',
+          time: timeNow,
+          code: base.code,
+          name: base.name,
+          entryPrice: q.price,
+          hardStop: q.price * 0.95,
+          suggestedUnits: Math.floor(20000 / q.price),
+          logic: `实时RSI: ${liveRsi.toFixed(1)} | 放量: ${realVolRatio.toFixed(1)}x | MA${strategyParams.maPeriod} 支撑`,
+          risk: (1 + Math.abs(q.changePercent)).toFixed(1) + '%'
+        });
+      }
+    });
+
+    setClassicSignals(newSuggestions);
+  }, [liveQuotes, strategyParams]);
 
   const triggerBuyDialog = (signal: any) => {
     setSelectedSignal(signal);
@@ -178,65 +229,170 @@ export default function App() {
       </header>
 
       <div className="flex-1 flex overflow-hidden">
-        {/* 2. 买入候选区 (Candidate Buy Zone - Harmonic Oscillator Signals) */}
-        <aside className="w-1/2 p-4 flex flex-col border-r border-slate-800/50 bg-slate-950/30">
-          <div className="flex items-center justify-between mb-4">
+        {/* COL 1. Market Pulse & Parameters */}
+        <aside className="w-[30%] p-4 flex flex-col border-r border-slate-800/50 bg-slate-900/10">
+          <div className="flex items-center justify-between mb-4 shrink-0">
             <h2 className="text-sm font-bold uppercase tracking-widest text-slate-300 flex items-center gap-2">
-              <div className="w-2 h-2 bg-blue-500 rounded-full animate-ping"></div>
-              Quantum Oscillator Signals
+              <Activity className="w-4 h-4 text-emerald-500" /> Market Pulse
             </h2>
-            <span className="text-[10px] text-slate-500 font-mono">Scan Interval: 5m</span>
+          </div>
+          
+          <div className="flex-1 overflow-y-auto pr-2 scrollbar-thin mb-4 border border-slate-800 rounded bg-black/50">
+            <table className="w-full text-xs text-left">
+              <thead className="bg-slate-900/80 sticky top-0 font-mono text-slate-500">
+                <tr>
+                  <th className="p-2 font-normal">Asset</th>
+                  <th className="p-2 font-normal text-right">Price</th>
+                  <th className="p-2 font-normal text-right">Change</th>
+                </tr>
+              </thead>
+              <tbody className="font-mono">
+                {liveQuotes.length === 0 ? (
+                   <tr><td colSpan={3} className="text-center p-4 text-slate-600">Awaiting SSE ticks...</td></tr>
+                ) : liveQuotes.map(q => (
+                  <tr key={q.code} className="border-b border-slate-800/30 hover:bg-slate-800/40">
+                    <td className="p-2 flex flex-col">
+                      <span className="text-slate-200">{q.name}</span>
+                    </td>
+                    <td className="p-2 text-right font-bold text-slate-300">{q.price.toFixed(2)}</td>
+                    <td className={`p-2 text-right ${q.changePercent >= 0 ? 'text-red-500' : 'text-green-500'}`}>
+                      {q.changePercent >= 0 ? '+' : ''}{q.changePercent.toFixed(2)}%
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
 
-          <div className="flex-1 overflow-y-auto space-y-3 pr-2 scrollbar-thin">
+          <div className="shrink-0 space-y-4 bg-slate-900/30 p-4 rounded-lg border border-slate-800">
+             <h3 className="text-xs font-bold uppercase flex items-center gap-2 text-slate-400">
+               <Settings2 className="w-4 h-4 text-blue-500" /> Classic Strategy Tuning
+             </h3>
+             <div className="space-y-4">
+                <div className="space-y-1">
+                  <div className="flex justify-between text-[10px] text-slate-400 uppercase tracking-wider">
+                    <span>RSI Threshold</span>
+                    <span className="text-white font-mono">{strategyParams.rsiThreshold}</span>
+                  </div>
+                  <Slider 
+                    value={[strategyParams.rsiThreshold]} 
+                    max={50} min={10} step={1}
+                    onValueChange={(val) => setStrategyParams({...strategyParams, rsiThreshold: val[0]})}
+                  />
+                </div>
+                <div className="space-y-1">
+                  <div className="flex justify-between text-[10px] text-slate-400 uppercase tracking-wider">
+                    <span>Volume Spike (x)</span>
+                    <span className="text-white font-mono">{strategyParams.volumeTrigger.toFixed(1)}</span>
+                  </div>
+                  <Slider 
+                    value={[strategyParams.volumeTrigger]} 
+                    max={4.0} min={1.0} step={0.1}
+                    onValueChange={(val) => setStrategyParams({...strategyParams, volumeTrigger: val[0]})}
+                  />
+                </div>
+                <div className="space-y-1">
+                  <div className="flex justify-between text-[10px] text-slate-400 uppercase tracking-wider">
+                    <span>MA Support</span>
+                    <span className="text-white font-mono">{strategyParams.maPeriod}</span>
+                  </div>
+                  <Slider 
+                    value={[strategyParams.maPeriod]} 
+                    max={60} min={5} step={5}
+                    onValueChange={(val) => setStrategyParams({...strategyParams, maPeriod: val[0]})}
+                  />
+                </div>
+             </div>
+          </div>
+        </aside>
+
+        {/* COL 2. Signal Generation Zone */}
+        <main className="w-[35%] p-4 flex flex-col border-r border-slate-800/50 bg-slate-950/30 relative">
+          <div className="absolute inset-0 bg-gradient-to-b from-blue-900/5 to-transparent pointer-events-none"></div>
+          <div className="flex items-center justify-between mb-4 z-10 shrink-0">
+            <h2 className="text-sm font-bold uppercase tracking-widest text-slate-300 flex items-center gap-2">
+              <Zap className="w-4 h-4 text-blue-500" /> Hybrid Signal Matrix
+            </h2>
+            <span className="text-[10px] text-slate-500 font-mono">Q-Oscillator & Params</span>
+          </div>
+
+          <div className="flex-1 overflow-y-auto space-y-3 pr-2 scrollbar-thin z-10">
             {quantumSignals.map(sig => (
-              <div key={sig.id} className="bg-slate-900/80 border border-blue-900/30 p-4 rounded-lg hover:border-blue-700/50 transition-colors relative overflow-hidden group">
-                <div className="absolute top-0 left-0 w-1 h-full bg-blue-600"></div>
-                
+              <div key={sig.id} className="bg-slate-900/80 border border-blue-900/30 p-4 rounded-lg hover:border-blue-700/50 transition-colors relative overflow-hidden group shadow-lg shadow-blue-900/5">
+                <div className="absolute top-0 left-0 w-1 h-full bg-blue-500"></div>
                 <div className="flex justify-between items-start mb-2">
                   <div>
-                    <h3 className="text-lg font-bold text-white flex items-center gap-2">
+                    <div className="text-[9px] text-blue-400 font-mono uppercase tracking-widest mb-1 flex items-center gap-1">
+                      <div className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-ping"></div>
+                      Quantum Oscillator
+                    </div>
+                    <h3 className="text-base font-bold text-white flex items-center gap-2">
                       {sig.name} <span className="text-slate-500 text-xs font-mono">({sig.code})</span>
                     </h3>
-                    <p className="text-[10px] font-mono text-blue-400 mt-1 opacity-80 leading-relaxed">
+                    <p className="text-[10px] font-mono text-slate-400 mt-1 leading-relaxed">
                       {sig.logic}
                     </p>
                   </div>
                   <button 
                     onClick={() => triggerBuyDialog(sig)}
-                    className="bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold py-1.5 px-4 rounded shadow-lg shadow-blue-900/30 transition-all active:scale-95 flex items-center gap-1"
+                    className="bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold py-1.5 px-4 rounded transition-all active:scale-95 flex items-center gap-1"
                   >
-                    <CheckCircle2 className="w-3 h-3" /> 我买了
+                    <CheckCircle2 className="w-3 h-3" /> Execute
                   </button>
                 </div>
-
                 <div className="grid grid-cols-3 gap-2 mt-4 text-xs font-mono">
                   <div className="bg-slate-950 p-2 rounded border border-slate-800">
-                    <div className="text-slate-500 mb-1 text-[9px] uppercase">入场价 (Entry)</div>
+                    <div className="text-slate-500 mb-1 text-[9px] uppercase">Entry</div>
                     <div className="text-red-400">{sig.entryPrice.toFixed(2)}</div>
                   </div>
                   <div className="bg-slate-950 p-2 rounded border border-slate-800">
-                    <div className="text-slate-500 mb-1 text-[9px] uppercase">硬止损 (Hard Stop)</div>
+                    <div className="text-slate-500 mb-1 text-[9px] uppercase">Hard Stop</div>
                     <div className="text-slate-300">{sig.hardStop.toFixed(2)}</div>
                   </div>
                   <div className="bg-slate-950 p-2 rounded border border-slate-800">
-                    <div className="text-slate-500 mb-1 text-[9px] uppercase">建议仓位 (Units)</div>
-                    <div className="text-blue-400">{sig.suggestedUnits} 股</div>
+                    <div className="text-slate-500 mb-1 text-[9px] uppercase">Sizing</div>
+                    <div className="text-blue-400">{sig.suggestedUnits}</div>
                   </div>
                 </div>
               </div>
             ))}
-            {quantumSignals.length === 0 && (
+
+            {classicSignals.map(sig => (
+              <div key={sig.id} className="bg-slate-900/60 border border-emerald-900/30 p-4 rounded-lg hover:border-emerald-700/50 transition-colors relative overflow-hidden group shadow-lg shadow-emerald-900/5">
+                <div className="absolute top-0 left-0 w-1 h-full bg-emerald-500"></div>
+                <div className="flex justify-between items-start mb-2">
+                  <div>
+                    <div className="text-[9px] text-emerald-400 font-mono uppercase tracking-widest mb-1">
+                      Classic Params
+                    </div>
+                    <h3 className="text-base font-bold text-white flex items-center gap-2">
+                      {sig.name} <span className="text-slate-500 text-xs font-mono">({sig.code})</span>
+                    </h3>
+                    <p className="text-[10px] font-mono text-slate-400 mt-1 leading-relaxed">
+                      {sig.logic}
+                    </p>
+                  </div>
+                  <button 
+                    onClick={() => triggerBuyDialog(sig)}
+                    className="bg-emerald-600/20 text-emerald-400 border border-emerald-600/30 hover:bg-emerald-600 hover:text-white text-xs font-bold py-1.5 px-3 rounded transition-all active:scale-95 flex items-center gap-1"
+                  >
+                    <CheckCircle2 className="w-3 h-3" /> Execute
+                  </button>
+                </div>
+              </div>
+            ))}
+
+            {quantumSignals.length === 0 && classicSignals.length === 0 && (
               <div className="flex flex-col items-center justify-center h-40 text-slate-600 gap-2">
                 <Activity className="w-8 h-8 opacity-20" />
-                <span className="text-xs font-mono uppercase tracking-widest">Awaiting Quantum Perturbations...</span>
+                <span className="text-xs font-mono uppercase tracking-widest">Awaiting Perturbations...</span>
               </div>
             )}
           </div>
-        </aside>
+        </main>
 
-        {/* 3. 持仓监控区 (Holdings Monitor Zone) */}
-        <main className="w-1/2 p-4 flex flex-col bg-black">
+        {/* COL 3. 持仓监控区 (Holdings Monitor Zone) */}
+        <aside className="w-[35%] p-4 flex flex-col bg-black">
           <div className="flex items-center justify-between mb-4">
             <h2 className="text-sm font-bold uppercase tracking-widest text-slate-300 flex items-center gap-2">
               <ShieldAlert className="w-4 h-4 text-slate-500" />
@@ -329,12 +485,12 @@ export default function App() {
                 <Clock className="w-8 h-8 opacity-20" />
                 <span className="text-xs font-mono uppercase tracking-widest text-center px-8">
                   No tracking positions found in positions.jsonl.<br/>
-                  Click "我买了" on a candidate signal to start tracking.
+                  Click "Execute" on a candidate signal to start tracking.
                 </span>
               </div>
             )}
           </div>
-        </main>
+        </aside>
       </div>
 
       {/* Confirmation Dialog */}

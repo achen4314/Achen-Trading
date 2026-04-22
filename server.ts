@@ -132,11 +132,11 @@ async function startServer() {
     }
   }
 
-  // === Routine: 30s Market Updates (Temperature & Holdings Array) ===
+  // === Routine: 2s Fast Market Updates for UI Pulse ===
   setInterval(async () => {
     const positions = readPositions();
     const posCodes = positions.map((p:any) => p.code);
-    const symbolsToFetch = [...new Set(['s_sh000001', 's_sz399001', ...posCodes])];
+    const symbolsToFetch = [...new Set([...CANDIDATES, 's_sh000001', 's_sz399001', ...posCodes])];
     
     const quotes = await fetchQuotes(symbolsToFetch);
     const market = quotes.filter(q => q.code.startsWith('s_'));
@@ -156,10 +156,10 @@ async function startServer() {
       breakerActive: false
     });
 
-    broadcast('holdings_quotes', stocks);
-  }, 5000); // Usually 30s, using 5s for demo responsiveness
+    broadcast('live_quotes', stocks);
+  }, 2000);
 
-  // === Routine: 5m Quantum Harmonic Oscillator Scan ===
+  // === Routine: 10s Quantum Harmonic Oscillator Scan ===
   // We use 10 seconds for demo visualization
   setInterval(async () => {
     const quotes = await fetchQuotes(CANDIDATES);
